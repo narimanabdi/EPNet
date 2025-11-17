@@ -1,6 +1,8 @@
 import tensorflow as tf
 from tensorflow import keras
 
+from models.metrics import loss_mse
+
 class Distiller(keras.Model):
     def __init__(self, student, teacher):
         super().__init__()
@@ -42,27 +44,28 @@ class Distiller(keras.Model):
         #xu = (tf.keras.layers.UpSampling2D(size=(2, 2), data_format=None, interpolation="nearest")(x[0]),tf.keras.layers.UpSampling2D(size=(2, 2), data_format=None, interpolation="nearest")(x[1]))
         #xu = (tf.keras.layers.MaxPooling2D(pool_size=(2, 2))(x[0]),tf.keras.layers.MaxPooling2D(pool_size=(2, 2))(x[1]))
         # Forward pass of teacher
-        teacher_predictions = self.teacher(x, training=False)
+        teacher_logits = self.teacher(x, training=False)
 
         with tf.GradientTape() as tape:
             # Forward pass of student
-            student_predictions = self.student(x, training=True)
+            student_logits = self.student(x, training=True) 
+            student_predictions = tf.nn.softmax(student_logits)
+            #student_logits = self.student.get_layer('euclidean__distance').output
             
             # Compute losses
-            student_loss = self.student_loss_fn(y, student_predictions)
+            classification_loss = self.student_loss_fn(y, student_predictions)
 
             # Compute scaled distillation loss from https://arxiv.org/abs/1503.02531
             # The magnitudes of the gradients produced by the soft targets scale
             # as 1/T^2, multiply them by T^2 when using both hard and soft targets.
             distillation_loss = (
                 self.distillation_loss_fn(
-                    tf.nn.softmax(teacher_predictions / self.temperature),
-                    tf.nn.softmax(student_predictions / self.temperature),
-                )
-                * self.temperature**2
+                    tf.nn.softmax(teacher_logits / self.temperature),
+                    tf.nn.softmax(student_logits / self.temperature),
+                )* self.temperature**2
             )
 
-            loss = self.alpha * student_loss + (1 - self.alpha) * distillation_loss
+            loss = ((1-self.alpha) * classification_loss) + ((self.alpha) * distillation_loss)
 
         # Compute gradients
         trainable_vars = self.student.trainable_variables
@@ -77,7 +80,7 @@ class Distiller(keras.Model):
         # Return a dict of performance
         results = {m.name: m.result() for m in self.metrics}
         results.update(
-            {"student_loss": student_loss, "distillation_loss": distillation_loss}
+            {"student_loss": classification_loss, "distillation_loss": distillation_loss}
         )
         return results
 
@@ -86,13 +89,14 @@ class Distiller(keras.Model):
         [xs,xq], y = data
 
         # Compute predictions
-        y_prediction = self.student([xs,xq], training=False)
+        student_logits = self.student([xs,xq], training=False)
+        student_predictions = tf.nn.softmax(student_logits)
 
         # Calculate the loss
-        student_loss = self.student_loss_fn(y, y_prediction)
+        student_loss = self.student_loss_fn(y, student_predictions)
 
         # Update the metrics.
-        self.compiled_metrics.update_state(y, y_prediction)
+        self.compiled_metrics.update_state(y, student_predictions)
 
         # Return a dict of performance
         results = {m.name: m.result() for m in self.metrics}

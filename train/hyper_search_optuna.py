@@ -1,14 +1,17 @@
+import argparse
+from time import time
+
+import optuna
 from tensorflow import keras
 import tensorflow as tf
 from tensorflow.keras.metrics import Mean, CategoricalAccuracy
-from models.metrics import loss_mse,accuracy,loss_new, loss_ce
-import argparse
-from time import time
-from data_loader import get_loader
-from models.distances import Weighted_Euclidean_Distance, Euclidean_Distance
-from models.stn import BilinearInterpolation,Localization
-from models.stn2 import DepthBilinearInterpolation,DepthLocalization
 from tensorflow.keras.models import load_model
+
+from models.metrics import loss_mse,accuracy,loss_new, loss_ce
+from models.makemodels import make_proto_model
+from data_loader import get_loader
+from models.distances import Weighted_Euclidean_Distance, Euclidean_Distance, Cosine_Distance
+from models.stn import BilinearInterpolation,Localization
 from models.senet import Senet
 from models.distill import Distiller
 from models.student import create_model_st
@@ -44,19 +47,36 @@ def make_data_generator(test_mode):
     else:
         train_gen, test_gen = loader.get_generator(
             batch=batch,dim=dim)
-        val_gen = ""
+        val_gen = []
 
     return train_gen,val_gen ,test_gen
+
+def make_teacher_encoder():
+    encoder = keras.models.load_model(
+    'model_files/best_encoders/densenet_' + args.test+ '_encoder.h5',
+    custom_objects={
+        'BilinearInterpolation':BilinearInterpolation,
+        'Localization':Localization},compile=False)
+    support = keras.layers.Input((64,64,3))
+    query = keras.layers.Input((64,64,3))
+    support_features = encoder(support)
+    query_features = encoder(query)
+    dist = Euclidean_Distance()([support_features,query_features])
+    return Senet(inputs = [support,query],outputs=dist)
     
 
-def meta_train(ep):
+def objective(trial):
     '''
     meta-training function
     ep: the number of epochs
     '''
-    keras.utils.set_random_seed(42)
-    student_file = 'model_files/student_' + args.test+ '_' + args.dloss + '_whole.h5'
-    student_encoder = 'model_files/student_' + args.test+ '_' + args.dloss + '_encoder.h5'
+  
+    te = make_teacher_encoder()
+
+    alpha = trial.suggest_float('alpha',0.1,0.9,step=0.1)
+    temp = trial.suggest_int('temp',2,20,step=1)
+    lr = trial.suggest_categorical('lr',[0.001,0.0009,1e-4,1e-5,8e-4,2e-3])
+   
     teacher = keras.models.load_model(
     'model_files/best_models/densenet_' + args.test+ '_whole.h5',
     custom_objects={
@@ -83,14 +103,10 @@ def meta_train(ep):
     #teacher.trainable = False
     student = create_model_st(teacher_model=teacher_clone, input_shape = (dim,dim,3))
     student.compile(optimizer=optimizer_fn,loss_fn=loss_mse,metrics=CategoricalAccuracy(name = 'accuracy'))
-    #student.summary()
     best_test_acc = 0.0
     #define distiller for knowledge distillation
-    #distiller = Distiller(student=student, teacher=teacher)
+
     distiller = Distiller(student=student, teacher=teacher_model)
-    #belga2flick alpha 0.9 temp 13 lr 0.002
-    #gtsrb2tt100k alpha 0.6 and temp 15
-    #gtsrb2toplogo alpha 0.4 temp 10
     if args.dloss == 'mse':
         distill_loss = loss_mse
     elif args.dloss == 'kl':
@@ -98,48 +114,26 @@ def meta_train(ep):
     distiller.compile(
         optimizer=optimizer_fn,
         metrics=[keras.metrics.CategoricalAccuracy()],
-        student_loss_fn=keras.losses.CategoricalCrossentropy(),
-        distillation_loss_fn=distill_loss,
-        alpha=0.3,#0.4 0.2
-        temperature=2.0,#19 2.0
+        student_loss_fn=loss_mse,
+        distillation_loss_fn=distill_loss,#distillation_loss_fn=keras.losses.KLDivergence()
+        alpha=alpha,
+        temperature=temp,
     )
-    train_datagen,val_datagen, test_datagen = make_data_generator(args.test)
-    strat_time = time()
-    for step in range(1):
-        #print(f'=====step {step+1}=====')
-   
-        for e in range(ep):
-            print(f'=====epoch {e+1}/{ep}=====')
-            distiller.fit(train_datagen,verbose=0)
-            te_acc,_ = distiller.evaluate(test_datagen, verbose=0)
-            if te_acc >= best_test_acc:
-                best_test_acc = te_acc
-                student.save(student_file)
-                student.save_weights('best_weights_student.h5')
-                print(f'===step {step+1} epoch {e+1}/{ep} best test accuracy: {best_test_acc:.4f}===')
-            #print(f'test accuracy: {te_acc:.4f}')
-            #print(f'best test accuracy: {best_test_acc:.4f}')
-            
-        student.load_weights('best_weights_student.h5')
-        optimizer_fn.learning_rate = optimizer_fn.learning_rate * 0.5   
-   
-    print('Meta Training has just been ended')
-    end_time = time() - strat_time
-    print(f'trainig time: {end_time}')
-    print(f'best test accuracy: {best_test_acc:.4f}')
-    loaded_model = load_model(
-        student_file,
-        custom_objects={
-            'Euclidean_Distance':Euclidean_Distance,
-            'Senet':Senet},compile=False)
-    enc = keras.Model(
-        inputs=loaded_model.get_layer('stu_encoder').input,
-        outputs=loaded_model.get_layer('stu_encoder').output)
-    enc.save(student_encoder)
-    print(f'cascade encoder saved at {student_encoder}')
+    train_datagen, val_dattagen, test_datagen = make_data_generator(args.test)
+    test_acc_tracker = Mean('train_accuracy')
+    # for e in range(1):
+    #     distiller.fit(train_datagen,verbose=0)
+    #     te_acc,_ = distiller.evaluate(test_datagen, verbose=0)
+    #     test_acc_tracker.update_state(te_acc)
+    distiller.fit(train_datagen,verbose=0)
+    te_acc,_ = distiller.evaluate(test_datagen, verbose=0)
+    
+    return 1 - te_acc
 
 
 if __name__ == "__main__":
-    meta_train(args.epochs)
+    study = optuna.create_study()
+    study.optimize(objective,n_trials=30)
+    print(study.best_params)
 
     

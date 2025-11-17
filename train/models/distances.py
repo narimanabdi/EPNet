@@ -6,7 +6,7 @@ class Euclidean_Distance(keras.layers.Layer):
     def __init__(self,**kwargs):
         super(Euclidean_Distance,self).__init__(**kwargs)
         #self.constant = tf.Variable(initial_value=0.1, dtype=tf.float32, trainable=True)
-
+    
     def call(self,inputs,**kwargs):
         support,query = inputs
         q2 = tf.reduce_sum(query ** 2, axis=1, keepdims=True)
@@ -25,7 +25,7 @@ class Cosine_Distance(keras.layers.Layer):
     def __init__(self,**kwargs):
         super(Cosine_Distance,self).__init__(**kwargs)
         #self.constant = tf.Variable(initial_value=0.1, dtype=tf.float32, trainable=True)
-
+    @tf.function
     def call(self,inputs,**kwargs):
         support,query = inputs
         normalize_support = tf.nn.l2_normalize(support,1)        

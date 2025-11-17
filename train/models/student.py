@@ -3,11 +3,12 @@ from tensorflow import keras
 from tensorflow.keras.layers import Input,Flatten,Dense,MaxPooling2D,Conv2D
 from tensorflow.keras.layers import BatchNormalization, Activation, Dropout
 from models.blocks import conv_block,dcp
-from models.distances import Weighted_Euclidean_Distance, Euclidean_Distance
+from models.distances import Weighted_Euclidean_Distance, Euclidean_Distance,Cosine_Distance
 from models.stn import stn
 from tensorflow.keras.applications import DenseNet121
 from models.senet import Senet
 from tensorflow.keras.applications import  MobileNetV2
+
 def create_encoder(gfenet_model):
     inp = Input((64,64,3))
     x = gfenet_model(inp)
@@ -31,9 +32,9 @@ def create_model_st( teacher_model, input_shape = (64,64,3)):
     support = Input(input_shape)
     query = Input(input_shape)
     encoder = create_encoder(GFENet)
-    encoder.summary()
+    #encoder.summary()
     support_features = encoder(support)
     query_features = encoder(query)
     dist = Euclidean_Distance()([support_features,query_features])
-    out = Activation("softmax")(dist)
-    return Senet(inputs = [support,query],outputs=out)
+    #out = Activation("softmax")(dist)
+    return Senet(inputs = [support,query],outputs=dist)
